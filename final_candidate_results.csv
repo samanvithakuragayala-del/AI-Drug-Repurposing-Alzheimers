@@ -1,0 +1,7 @@
+display_drug,gene,predicted_probability
+Ramipril,SLC6A3,0.9608333333333332
+Trandolapril,SLC6A3,0.9641666666666666
+Lisinopril,ACE,0.9733333333333334
+Enalaprilat,ACE,0.9766666666666668
+Benazepril,ACE,0.98
+Sertraline,SLC6A3,0.98
