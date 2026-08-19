@@ -1,232 +1,156 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import requests
+from urllib.parse import quote
 
-from rdkit import Chem
-from rdkit.Chem import rdFingerprintGenerator
-from rdkit.Chem import Draw
-from sklearn.ensemble import RandomForestClassifier
-
-
-# ==========================================================
-# PAGE SETTINGS
-# ==========================================================
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
-    page_title="AI Drug Repurposing",
-    page_icon="🧠",
+    page_title="AI Drug Repurposing - Alzheimer's Disease",
+    page_icon="🧬",
     layout="wide"
 )
 
-
-# ==========================================================
+# ============================================================
 # TITLE
-# ==========================================================
+# ============================================================
 
-st.title("🧠 AI-Based Drug Repurposing")
+st.title("🧬 AI-Based Drug Repurposing")
 st.subheader("Alzheimer's Disease")
 
 st.write(
-    "Machine-learning-based prediction of potential "
-    "drug–target interactions for Alzheimer’s disease."
+    "Predict potential drug-target interactions using a "
+    "machine-learning-based drug repurposing approach."
 )
 
-st.info(
-    "Enter an approved drug name to identify its "
-    "highest-ranked predicted Alzheimer’s-associated target."
-)
-
-
-# ==========================================================
+# ============================================================
 # LOAD DATA
-# ==========================================================
+# ============================================================
 
 @st.cache_data
 def load_data():
 
-    df = pd.read_csv("ml_dataset.csv")
+    final_file = "final_candidate_results.csv"
+    top_file = "top_candidates.csv"
 
-    return df
+    final_df = pd.DataFrame()
+    top_df = pd.DataFrame()
 
+    try:
+        final_df = pd.read_csv(final_file)
+    except Exception:
+        pass
 
-# ==========================================================
-# TRAIN MODEL
-# ==========================================================
+    try:
+        top_df = pd.read_csv(top_file)
+    except Exception:
+        pass
 
-@st.cache_resource
-def train_model(df):
-
-    generator = rdFingerprintGenerator.GetMorganGenerator(
-        radius=2,
-        fpSize=2048
-    )
-
-    fingerprints = []
-    valid_rows = []
-
-    for index, smiles in df["canonical_smiles"].items():
-
-        mol = Chem.MolFromSmiles(str(smiles))
-
-        if mol is None:
-            continue
-
-        fp = generator.GetFingerprintAsNumPy(mol)
-
-        fingerprints.append(fp)
-        valid_rows.append(index)
-
-    clean_df = df.loc[
-        valid_rows
-    ].reset_index(drop=True)
-
-    fingerprints = np.array(
-        fingerprints
-    )
-
-    # Target encoding
-    target_names = sorted(
-        clean_df["gene"]
-        .dropna()
-        .unique()
-    )
-
-    target_index = {
-        target: i
-        for i, target in enumerate(target_names)
-    }
-
-    target_features = np.zeros(
-        (
-            len(clean_df),
-            len(target_names)
-        )
-    )
-
-    for i, target in enumerate(
-        clean_df["gene"]
-    ):
-
-        if target in target_index:
-
-            target_features[
-                i,
-                target_index[target]
-            ] = 1
-
-    X = np.hstack(
-        [
-            fingerprints,
-            target_features
-        ]
-    )
-
-    y = clean_df[
-        "interaction_label"
-    ].astype(int)
-
-    model = RandomForestClassifier(
-        n_estimators=300,
-        random_state=42,
-        n_jobs=-1,
-        class_weight="balanced"
-    )
-
-    model.fit(X, y)
-
-    return (
-        model,
-        generator,
-        target_names,
-        target_index,
-        clean_df
-    )
+    return final_df, top_df
 
 
-# ==========================================================
-# GET DRUG FROM CHEMBL
-# ==========================================================
+final_df, top_df = load_data()
 
-@st.cache_data
-def get_drug(drug_name):
 
-    url = (
-        "https://www.ebi.ac.uk/"
-        "chembl/api/data/molecule/search.json"
-    )
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
 
-    params = {
-        "q": drug_name
-    }
+def clean_drug_name(name):
+    """Clean user-entered drug name."""
+    return name.strip().upper()
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=30
-    )
 
-    response.raise_for_status()
+def get_structure_image(drug_name):
+    """
+    Get molecular structure image from PubChem.
 
-    data = response.json()
+    This avoids RDKit Draw so the Streamlit deployment
+    does not depend on rdMolDraw2D.
+    """
 
-    molecules = data.get(
-        "molecules",
-        []
-    )
+    try:
 
-    if not molecules:
+        encoded_name = quote(drug_name)
 
-        return None
-
-    # Try exact preferred-name match first
-    drug_lower = drug_name.strip().lower()
-
-    for molecule in molecules:
-
-        pref_name = molecule.get(
-            "pref_name"
+        url = (
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/"
+            f"compound/name/{encoded_name}/PNG"
         )
 
-        if (
-            pref_name
-            and pref_name.lower()
-            == drug_lower
-        ):
+        response = requests.get(
+            url,
+            timeout=20
+        )
 
-            return molecule
+        if response.status_code == 200:
+            return response.content
 
-    return molecules[0]
+    except Exception:
+        pass
 
-
-# ==========================================================
-# LOAD MODEL
-# ==========================================================
-
-try:
-
-    df = load_data()
-
-    (
-        model,
-        generator,
-        target_names,
-        target_index,
-        clean_df
-    ) = train_model(df)
-
-except Exception as e:
-
-    st.error(
-        f"Model loading error: {e}"
-    )
-
-    st.stop()
+    return None
 
 
-# ==========================================================
+def find_drug_results(drug_name):
+    """Find prediction results for the entered drug."""
+
+    drug_name = clean_drug_name(drug_name)
+
+    results = pd.DataFrame()
+
+    # --------------------------------------------------------
+    # Search final candidate results
+    # --------------------------------------------------------
+
+    if not final_df.empty:
+
+        df = final_df.copy()
+
+        if "display_drug" in df.columns:
+
+            mask = (
+                df["display_drug"]
+                .astype(str)
+                .str.upper()
+                .str.contains(
+                    drug_name,
+                    na=False
+                )
+            )
+
+            results = df[mask].copy()
+
+    # --------------------------------------------------------
+    # If not found, search top candidates
+    # --------------------------------------------------------
+
+    if results.empty and not top_df.empty:
+
+        df = top_df.copy()
+
+        if "drug_name" in df.columns:
+
+            mask = (
+                df["drug_name"]
+                .astype(str)
+                .str.upper()
+                .str.contains(
+                    drug_name,
+                    na=False
+                )
+            )
+
+            results = df[mask].copy()
+
+    return results
+
+
+# ============================================================
 # DRUG INPUT
-# ==========================================================
+# ============================================================
 
 drug_name = st.text_input(
     "Enter Drug Name",
@@ -234,12 +158,12 @@ drug_name = st.text_input(
 )
 
 
-# ==========================================================
-# PREDICT
-# ==========================================================
+# ============================================================
+# PREDICT BUTTON
+# ============================================================
 
 if st.button(
-    "🔬 Predict Drug–Target Interaction",
+    "🔬 Predict Drug-Target Interaction",
     type="primary"
 ):
 
@@ -249,254 +173,283 @@ if st.button(
             "Please enter a drug name."
         )
 
-        st.stop()
+    else:
 
-    with st.spinner(
-        "Finding drug and generating prediction..."
-    ):
+        search_name = clean_drug_name(drug_name)
 
-        try:
+        with st.spinner(
+            "Analyzing drug-target interaction..."
+        ):
 
-            # ----------------------------------------------
-            # Find drug
-            # ----------------------------------------------
-
-            molecule_data = get_drug(
-                drug_name
+            results = find_drug_results(
+                search_name
             )
 
-            if molecule_data is None:
+            # ==================================================
+            # IF RESULTS FOUND
+            # ==================================================
 
-                st.error(
-                    "Drug not found in ChEMBL. "
-                    "Try another drug name."
+            if not results.empty:
+
+                st.success(
+                    "Prediction completed successfully."
                 )
 
-                st.stop()
+                # ------------------------------------------------
+                # Determine drug name
+                # ------------------------------------------------
 
-            chembl_id = molecule_data.get(
-                "molecule_chembl_id"
-            )
+                if "display_drug" in results.columns:
 
-            pref_name = molecule_data.get(
-                "pref_name"
-            )
+                    pref_name = str(
+                        results.iloc[0]["display_drug"]
+                    )
 
-            structures = molecule_data.get(
-                "molecule_structures"
-            )
+                elif "drug_name" in results.columns:
 
-            if not structures:
+                    pref_name = str(
+                        results.iloc[0]["drug_name"]
+                    )
 
-                st.error(
-                    "No molecular structure was found "
-                    "for this drug."
-                )
+                else:
 
-                st.stop()
+                    pref_name = drug_name.upper()
 
-            smiles = structures.get(
-                "canonical_smiles"
-            )
+                # ------------------------------------------------
+                # Main result
+                # ------------------------------------------------
 
-            if not smiles:
+                first_result = results.iloc[0]
 
-                st.error(
-                    "No canonical SMILES was available."
-                )
+                if "gene" in results.columns:
 
-                st.stop()
+                    top_target = str(
+                        first_result["gene"]
+                    )
 
+                else:
 
-            # ----------------------------------------------
-            # RDKit molecule
-            # ----------------------------------------------
+                    top_target = "Unknown"
 
-            mol = Chem.MolFromSmiles(
-                smiles
-            )
+                if "predicted_probability" in results.columns:
 
-            if mol is None:
+                    try:
 
-                st.error(
-                    "RDKit could not process "
-                    "this molecular structure."
-                )
-
-                st.stop()
-
-
-            # ----------------------------------------------
-            # Molecular fingerprint
-            # ----------------------------------------------
-
-            fingerprint = (
-                generator
-                .GetFingerprintAsNumPy(mol)
-            )
-
-
-            # ----------------------------------------------
-            # Predict against every AD target
-            # ----------------------------------------------
-
-            predictions = []
-
-            for target in target_names:
-
-                target_vector = np.zeros(
-                    len(target_names)
-                )
-
-                target_vector[
-                    target_index[target]
-                ] = 1
-
-                features = np.concatenate(
-                    [
-                        fingerprint,
-                        target_vector
-                    ]
-                )
-
-                probability = (
-                    model
-                    .predict_proba(
-                        features.reshape(
-                            1, -1
+                        top_probability = float(
+                            first_result[
+                                "predicted_probability"
+                            ]
                         )
-                    )[0, 1]
+
+                    except Exception:
+
+                        top_probability = 0.0
+
+                else:
+
+                    top_probability = 0.0
+
+                # =================================================
+                # RESULT COLUMNS
+                # =================================================
+
+                col1, col2 = st.columns(
+                    [1, 1]
                 )
 
-                predictions.append(
-                    {
-                        "Target": target,
-                        "Predicted Probability":
-                            probability
-                    }
+                # =================================================
+                # DRUG INFORMATION
+                # =================================================
+
+                with col1:
+
+                    st.markdown(
+                        "### Drug"
+                    )
+
+                    st.markdown(
+                        f"# {pref_name}"
+                    )
+
+                    # ChEMBL ID if available
+
+                    if "molecule_chembl_id" in results.columns:
+
+                        chembl_id = str(
+                            first_result[
+                                "molecule_chembl_id"
+                            ]
+                        )
+
+                        st.write(
+                            f"**ChEMBL ID:** {chembl_id}"
+                        )
+
+                    st.write(
+                        f"**Predicted target:** "
+                        f"{top_target}"
+                    )
+
+                    st.write(
+                        "**Predicted interaction "
+                        "probability**"
+                    )
+
+                    st.markdown(
+                        f"# {top_probability * 100:.2f}%"
+                    )
+
+                # =================================================
+                # MOLECULAR STRUCTURE
+                # =================================================
+
+                with col2:
+
+                    st.markdown(
+                        "### Molecular Structure"
+                    )
+
+                    image = get_structure_image(
+                        pref_name
+                    )
+
+                    if image is not None:
+
+                        st.image(
+                            image,
+                            caption=pref_name,
+                            width=450
+                        )
+
+                    else:
+
+                        st.info(
+                            "Molecular structure image "
+                            "is unavailable from PubChem."
+                        )
+
+                # =================================================
+                # TOP TARGETS
+                # =================================================
+
+                st.markdown(
+                    "## Top Predicted Alzheimer's Targets"
                 )
 
+                target_table = pd.DataFrame()
 
-            results = pd.DataFrame(
-                predictions
-            )
+                if (
+                    "gene" in results.columns
+                    and
+                    "predicted_probability"
+                    in results.columns
+                ):
 
-            results = results.sort_values(
-                "Predicted Probability",
-                ascending=False
-            )
+                    target_table = results[
+                        [
+                            "gene",
+                            "predicted_probability"
+                        ]
+                    ].copy()
 
-            top_result = results.iloc[0]
+                    target_table = (
+                        target_table
+                        .drop_duplicates(
+                            subset=["gene"]
+                        )
+                        .sort_values(
+                            "predicted_probability",
+                            ascending=False
+                        )
+                        .head(10)
+                    )
 
-            top_target = top_result[
-                "Target"
-            ]
+                    target_table[
+                        "predicted_probability"
+                    ] = (
+                        target_table[
+                            "predicted_probability"
+                        ] * 100
+                    ).round(2)
 
-            top_probability = top_result[
-                "Predicted Probability"
-            ]
+                    target_table = (
+                        target_table
+                        .rename(
+                            columns={
+                                "gene": "Target",
+                                "predicted_probability":
+                                    "Predicted Probability (%)"
+                            }
+                        )
+                    )
 
+                if not target_table.empty:
 
-            # ==================================================
-            # DISPLAY RESULTS
-            # ==================================================
+                    st.dataframe(
+                        target_table,
+                        use_container_width=True,
+                        hide_index=True
+                    )
 
-            st.success(
-                "Prediction completed successfully."
-            )
+                else:
 
-            col1, col2 = st.columns(2)
+                    st.info(
+                        "Target-level results are "
+                        "not available for this drug."
+                    )
 
-            with col1:
+                # =================================================
+                # INTERPRETATION
+                # =================================================
 
-                st.metric(
-                    "Drug",
-                    pref_name or drug_name
+                st.markdown(
+                    "## Interpretation"
                 )
 
                 st.write(
-                    f"**ChEMBL ID:** {chembl_id}"
+                    f"The model prioritized "
+                    f"**{pref_name}** for potential "
+                    f"interaction with **{top_target}**, "
+                    f"with a predicted interaction "
+                    f"probability of "
+                    f"**{top_probability * 100:.2f}%**."
                 )
 
-                st.write(
-                    f"**Predicted target:** "
-                    f"{top_target}"
+                # =================================================
+                # DISCLAIMER
+                # =================================================
+
+                st.warning(
+                    "This is an in-silico prediction for "
+                    "research prioritization only. It does not "
+                    "establish therapeutic efficacy or clinical "
+                    "benefit."
                 )
-
-                st.metric(
-                    "Predicted interaction probability",
-                    f"{top_probability * 100:.2f}%"
-                )
-
-
-            with col2:
-
-                st.write(
-                    "**Molecular structure**"
-                )
-
-                image = Draw.MolToImage(
-                    mol,
-                    size=(400, 300)
-                )
-
-                st.image(
-                    image,
-                    caption=pref_name or drug_name
-                )
-
 
             # ==================================================
-            # TOP PREDICTIONS
+            # DRUG NOT FOUND
             # ==================================================
 
-            st.subheader(
-                "Top Predicted Alzheimer’s Targets"
-            )
+            else:
 
-            display_results = results.head(
-                5
-            ).copy()
+                st.error(
+                    f"No prediction result found for "
+                    f"'{drug_name}'."
+                )
 
-            display_results[
-                "Predicted Probability"
-            ] = (
-                display_results[
-                    "Predicted Probability"
-                ] * 100
-            ).round(2)
-
-            st.dataframe(
-                display_results,
-                use_container_width=True,
-                hide_index=True
-            )
+                st.info(
+                    "Try a drug present in the trained "
+                    "candidate dataset, such as Ramipril."
+                )
 
 
-            # ==================================================
-            # INTERPRETATION
-            # ==================================================
+# ============================================================
+# FOOTER
+# ============================================================
 
-            st.subheader(
-                "Interpretation"
-            )
+st.markdown("---")
 
-            st.write(
-                f"The model prioritized **{pref_name or drug_name}** "
-                f"for interaction with **{top_target}**, "
-                f"with a predicted interaction probability "
-                f"of **{top_probability * 100:.2f}%**."
-            )
-
-            st.warning(
-                "This is an in-silico prediction for "
-                "research prioritization only. It does not "
-                "establish therapeutic efficacy or clinical benefit."
-            )
-
-
-        except Exception as e:
-
-            st.error(
-                f"Prediction error: {e}"
-            )
+st.caption(
+    "AI-Based Drug Repurposing for Alzheimer's Disease | "
+    "Machine Learning Research Prototype"
+)
